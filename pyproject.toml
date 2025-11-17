@@ -1,0 +1,11 @@
+[project]
+name = "insya-analyzer-backend"
+requires-python = ">=3.10"
+
+[tool.poetry]
+name = "insya-analyzer-backend"
+description = "Backend for INSYA Analyzer"
+authors = ["Your Name <your.email@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
