@@ -554,9 +554,6 @@ def health_check():
     })
 
 
-# Vercel serverless function handler
-def handler(environ, start_response):
-    return app(environ, start_response)
 
 # Local development
 if __name__ == '__main__':
