@@ -519,6 +519,24 @@ def generate_and_analyze():
         }), 500
 
 
+# ========== Root Endpoint ==========
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({
+        'message': 'Enhanced Arabic Text Analyzer API',
+        'status': 'running',
+        'version': '1.0',
+        'endpoints': {
+            'ocr': '/ocr - Extract Arabic text from images (POST)',
+            'analyze_arabic': '/analyze_arabic - Analyze Arabic text for errors (POST)',
+            'ocr_and_analyze': '/ocr_and_analyze - Combined OCR + Analysis (POST)',
+            'generate_arabic': '/generate_arabic - Generate Arabic text (POST)',
+            'generate_and_analyze': '/generate_and_analyze - Generate + Analyze (POST)',
+            'health': '/health - Health check (GET)'
+        },
+        'usage': 'Send POST requests to the endpoints with appropriate data'
+    })
+
 # ========== Health Check Endpoint ==========
 @app.route('/health', methods=['GET'])
 def health_check():
