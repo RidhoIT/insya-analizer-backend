@@ -7,14 +7,14 @@ import json
 import io
 import re
 
-from flask import jsonify
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type"]}})
 
 # 🔑 Multiple API Keys for fallback - ganti dengan API keys milikmu
 GEMINI_API_KEYS = [
+     "AIzaSyAJl7pwh_Hj5fmRFtQl6T14ZkiTzdrautQ", 
     "AIzaSyDvo1FDQbtVtLxpGk1E40_xE0wv3xtpuys",
-    "AIzaSyAJl7pwh_Hj5fmRFtQl6T14ZkiTzdrautQ",
+   
     "AIzaSyCxmGRVK9KFE8kHdxH6ON63lw9BtjxhV5M"
 ]
 
@@ -36,7 +36,7 @@ def clean_arabic_text(text):
     """Clean Arabic text from unwanted English explanations"""
     if not text:
         return ""
-
+    
     # Remove common English phrases that appear in OCR results
     english_patterns = [
         r"Berikut teks Arab.*?:",
@@ -56,21 +56,21 @@ def clean_arabic_text(text):
         r"\n\n[A-Za-z].*",  # Remove paragraph starting with English
         r"[A-Za-z]{3,}.*?Arabic.*?\.",  # Remove English sentences mentioning Arabic
     ]
-
+    
     cleaned_text = text
     for pattern in english_patterns:
         cleaned_text = re.sub(pattern, "", cleaned_text, flags=re.IGNORECASE | re.DOTALL)
-
+    
     # Remove excessive whitespace and newlines
     cleaned_text = re.sub(r'\n\s*\n', '\n', cleaned_text)
     cleaned_text = re.sub(r'\s{3,}', ' ', cleaned_text)
-
+    
     return cleaned_text.strip()
 
 def make_gemini_request(url, body, api_keys):
     """Make request to Gemini API with fallback across multiple keys"""
     headers = {"Content-Type": "application/json"}
-
+    
     for i, api_key in enumerate(api_keys):
         try:
             response = requests.post(
@@ -79,17 +79,17 @@ def make_gemini_request(url, body, api_keys):
                 json=body,
                 timeout=30
             )
-
+            
             if response.status_code == 200:
                 return response.json(), None
             else:
                 print(f"[!] API key {i+1} failed with status {response.status_code}: {response.text[:100]}...")
                 continue
-
+                
         except Exception as e:
             print(f"[!] API key {i+1} failed with error: {str(e)}")
             continue
-
+    
     return None, "All API keys failed"
 
 # ========== 1️⃣ Enhanced OCR Endpoint ==========
@@ -105,10 +105,10 @@ def ocr_image():
 
         # Open and process image
         image = Image.open(file.stream)
-
+        
         # Convert image to base64
         base64_image = encode_image_to_base64(image)
-
+        
         # Improved prompt to avoid English explanations
         body = {
             "contents": [
@@ -131,16 +131,16 @@ def ocr_image():
                 "maxOutputTokens": 2048,
             }
         }
-
+        
         # Make request with fallback API keys
         result, error = make_gemini_request(GEMINI_VISION_URL, body, GEMINI_API_KEYS)
-
+        
         if result and 'candidates' in result and len(result['candidates']) > 0:
             extracted_text = result['candidates'][0]['content']['parts'][0]['text']
-
+            
             # Clean the extracted text
             cleaned_text = clean_arabic_text(extracted_text)
-
+            
             return jsonify({
                 'text': cleaned_text,
                 'success': True,
@@ -151,7 +151,7 @@ def ocr_image():
                 'error': error or 'Failed to extract text from image',
                 'success': False
             }), 500
-
+            
     except Exception as e:
         return jsonify({
             'error': f'Error processing image: {str(e)}',
@@ -166,7 +166,7 @@ def analyze_arabic():
         data = request.json
         if not data:
             return jsonify({'error': 'No JSON data provided', 'success': False}), 400
-
+            
         arabic_text = data.get('text', '')
 
         if not arabic_text.strip():
@@ -220,10 +220,10 @@ def analyze_arabic():
         }
 
         result, error = make_gemini_request(GEMINI_TEXT_URL, body, GEMINI_API_KEYS)
-
+        
         if result and 'candidates' in result and len(result['candidates']) > 0:
             analysis_text = result['candidates'][0]['content']['parts'][0]['text']
-
+            
             return jsonify({
                 'success': True,
                 'analysis': analysis_text.strip(),
@@ -234,7 +234,7 @@ def analyze_arabic():
                 'error': error or 'Failed to analyze text',
                 'success': False
             }), 500
-
+            
     except Exception as e:
         return jsonify({
             'error': f'Error analyzing text: {str(e)}',
@@ -258,7 +258,7 @@ def ocr_and_analyze():
         print("Performing OCR with Gemini...")
         image = Image.open(file.stream)
         base64_image = encode_image_to_base64(image)
-
+        
         ocr_body = {
             "contents": [
                 {
@@ -280,20 +280,20 @@ def ocr_and_analyze():
                 "maxOutputTokens": 2048,
             }
         }
-
+        
         ocr_result, ocr_error = make_gemini_request(GEMINI_VISION_URL, ocr_body, GEMINI_API_KEYS)
-
+        
         if not ocr_result or 'candidates' not in ocr_result or len(ocr_result['candidates']) == 0:
             return jsonify({
                 'error': f'OCR failed: {ocr_error}',
                 'success': False
             }), 500
-
+            
         extracted_text = ocr_result['candidates'][0]['content']['parts'][0]['text']
         cleaned_extracted_text = clean_arabic_text(extracted_text)
-
+        
         print("Performing Language Analysis...")
-
+        
         # Step 2: Analysis using the same prompt as Colab
         analysis_prompt = f"""
 قم بتصحيح الأخطاء في النص التالي:
@@ -340,9 +340,9 @@ def ocr_and_analyze():
                 "maxOutputTokens": 4096,
             }
         }
-
+        
         analysis_result, analysis_error = make_gemini_request(GEMINI_TEXT_URL, analysis_body, GEMINI_API_KEYS)
-
+        
         if not analysis_result or 'candidates' not in analysis_result or len(analysis_result['candidates']) == 0:
             return jsonify({
                 'success': True,
@@ -350,9 +350,9 @@ def ocr_and_analyze():
                 'analysis': f'Analysis failed: {analysis_error}',
                 'error_in_analysis': True
             })
-
+            
         analysis_text = analysis_result['candidates'][0]['content']['parts'][0]['text']
-
+        
         return jsonify({
             'success': True,
             'extracted_text': cleaned_extracted_text,
@@ -360,7 +360,7 @@ def ocr_and_analyze():
             'message': 'OCR and analysis completed successfully',
             'raw_extracted_text': extracted_text  # Include for debugging
         })
-
+        
     except Exception as e:
         return jsonify({
             'error': f'Error in OCR and analysis: {str(e)}',
@@ -375,7 +375,7 @@ def generate_arabic():
         data = request.json
         if not data:
             data = {}
-
+            
         prompt = data.get('prompt', 'اكتب لي نصا عربيا قصيرا')
 
         body = {
@@ -393,7 +393,7 @@ def generate_arabic():
         }
 
         result, error = make_gemini_request(GEMINI_TEXT_URL, body, GEMINI_API_KEYS)
-
+        
         if result and 'candidates' in result and len(result['candidates']) > 0:
             generated_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
             return jsonify({
@@ -405,7 +405,7 @@ def generate_arabic():
                 'error': error or 'Failed to generate text',
                 'success': False
             }), 500
-
+            
     except Exception as e:
         return jsonify({
             'error': f'Error generating text: {str(e)}',
@@ -420,7 +420,7 @@ def generate_and_analyze():
         data = request.json
         if not data:
             data = {}
-
+            
         prompt = data.get('prompt', 'اكتب لي نصا عربيا قصيرا')
 
         # Step 1: Generate text
@@ -439,7 +439,7 @@ def generate_and_analyze():
         }
 
         gen_result, gen_error = make_gemini_request(GEMINI_TEXT_URL, generate_body, GEMINI_API_KEYS)
-
+        
         if not gen_result or 'candidates' not in gen_result or len(gen_result['candidates']) == 0:
             return jsonify({
                 'error': f'Text generation failed: {gen_error}',
@@ -520,6 +520,24 @@ def generate_and_analyze():
         }), 500
 
 
+# ========== Root Endpoint ==========
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({
+        'message': 'Enhanced Arabic Text Analyzer API',
+        'status': 'running',
+        'version': '1.0',
+        'endpoints': {
+            'ocr': '/ocr - Extract Arabic text from images (POST)',
+            'analyze_arabic': '/analyze_arabic - Analyze Arabic text for errors (POST)',
+            'ocr_and_analyze': '/ocr_and_analyze - Combined OCR + Analysis (POST)',
+            'generate_arabic': '/generate_arabic - Generate Arabic text (POST)',
+            'generate_and_analyze': '/generate_and_analyze - Generate + Analyze (POST)',
+            'health': '/health - Health check (GET)'
+        },
+        'usage': 'Send POST requests to the endpoints with appropriate data'
+    })
+
 # ========== Health Check Endpoint ==========
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -531,12 +549,14 @@ def health_check():
             'ocr': '/ocr - Extract Arabic text from images',
             'analyze_arabic': '/analyze_arabic - Analyze Arabic text for errors',
             'ocr_and_analyze': '/ocr_and_analyze - Combined OCR + Analysis',
-            'generate_arabic': '/generate_arabic - Generate Arabic text',
+            'generate_arabic': '/generate_arabic - Generate Arabic text', 
             'generate_and_analyze': '/generate_and_analyze - Generate + Analyze'
         }
     })
 
 
+
+# Local development
 if __name__ == '__main__':
     print("Starting Enhanced Arabic Text Analyzer API...")
     print(f"Using {len(GEMINI_API_KEYS)} API keys for fallback")
