@@ -1,177 +1,552 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os
-import re
-from datetime import datetime
+from PIL import Image
+import requests
+import base64
 import json
+import io
+import re
 
+from flask import jsonify
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type"]}})
 
-# Data sementara (nanti bisa diganti dengan database)
-users = {}
-results_history = []
+# 🔑 Multiple API Keys for fallback - ganti dengan API keys milikmu
+GEMINI_API_KEYS = [
+    "AIzaSyDvo1FDQbtVtLxpGk1E40_xE0wv3xtpuys",
+    "AIzaSyAJl7pwh_Hj5fmRFtQl6T14ZkiTzdrautQ",
+    "AIzaSyCxmGRVK9KFE8kHdxH6ON63lw9BtjxhV5M"
+]
 
-@app.route('/')
-def home():
-    return jsonify({
-        'message': 'INSYA Analyzer Backend API',
-        'version': '1.0.0',
-        'status': 'running'
-    })
+# Ganti di kode Anda:
+GEMINI_VISION_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+def encode_image_to_base64(image):
+    """Convert PIL Image to base64 string"""
+    buffered = io.BytesIO()
+    # Convert to RGB if image has transparency (RGBA)
+    if image.mode in ('RGBA', 'LA'):
+        background = Image.new('RGB', image.size, (255, 255, 255))
+        background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+        image = background
+    image.save(buffered, format="JPEG", quality=85)
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-@app.route('/api/register', methods=['POST'])
-def register():
+def clean_arabic_text(text):
+    """Clean Arabic text from unwanted English explanations"""
+    if not text:
+        return ""
+
+    # Remove common English phrases that appear in OCR results
+    english_patterns = [
+        r"Berikut teks Arab.*?:",
+        r"There are some.*?differences.*?\.",
+        r"I have corrected.*?\.",
+        r"The most significant difference.*?\.",
+        r"based on my understanding.*?\.",
+        r"common Arabic spelling.*?\.",
+        r"where the OCR.*?\.",
+        r"Here is the.*?:",
+        r"The Arabic text.*?:",
+        r"OCR misinterprets.*?\.",
+        r"Some minor.*?transcription\.",
+        r"[A-Za-z].*?spelling\.",
+        r".*?significant difference.*?\.",
+        r".*?understanding.*?context.*?\.",
+        r"\n\n[A-Za-z].*",  # Remove paragraph starting with English
+        r"[A-Za-z]{3,}.*?Arabic.*?\.",  # Remove English sentences mentioning Arabic
+    ]
+
+    cleaned_text = text
+    for pattern in english_patterns:
+        cleaned_text = re.sub(pattern, "", cleaned_text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Remove excessive whitespace and newlines
+    cleaned_text = re.sub(r'\n\s*\n', '\n', cleaned_text)
+    cleaned_text = re.sub(r'\s{3,}', ' ', cleaned_text)
+
+    return cleaned_text.strip()
+
+def make_gemini_request(url, body, api_keys):
+    """Make request to Gemini API with fallback across multiple keys"""
+    headers = {"Content-Type": "application/json"}
+
+    for i, api_key in enumerate(api_keys):
+        try:
+            response = requests.post(
+                f"{url}?key={api_key}",
+                headers=headers,
+                json=body,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                return response.json(), None
+            else:
+                print(f"[!] API key {i+1} failed with status {response.status_code}: {response.text[:100]}...")
+                continue
+
+        except Exception as e:
+            print(f"[!] API key {i+1} failed with error: {str(e)}")
+            continue
+
+    return None, "All API keys failed"
+
+# ========== 1️⃣ Enhanced OCR Endpoint ==========
+@app.route('/ocr', methods=['POST'])
+def ocr_image():
     try:
-        data = request.get_json()
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image file provided', 'success': False}), 400
 
-        # Validasi input
-        if not data or not data.get('email') or not data.get('password'):
-            return jsonify({'error': 'Email dan password harus diisi'}), 400
+        file = request.files['image']
+        if file.filename == '':
+            return jsonify({'error': 'No selected file', 'success': False}), 400
 
-        email = data['email']
-        password = data['password']
-        name = data.get('name', '')
+        # Open and process image
+        image = Image.open(file.stream)
 
-        # Cek jika email sudah terdaftar
-        if email in users:
-            return jsonify({'error': 'Email sudah terdaftar'}), 400
+        # Convert image to base64
+        base64_image = encode_image_to_base64(image)
 
-        # Simpan user (dalam implementasi nyata, hash password dulu)
-        users[email] = {
-            'name': name,
-            'email': email,
-            'password': password,  # Ini harus di-hash di produksi
-            'created_at': datetime.now().isoformat()
-        }
-
-        return jsonify({
-            'message': 'Registrasi berhasil',
-            'user': {
-                'name': name,
-                'email': email
+        # Improved prompt to avoid English explanations
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": "استخرج النص العربي من هذه الصورة بدقة. أريد النص العربي فقط بدون أي تفسير أو تعليق إضافي."
+                        },
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": base64_image
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 2048,
             }
-        }), 201
+        }
+
+        # Make request with fallback API keys
+        result, error = make_gemini_request(GEMINI_VISION_URL, body, GEMINI_API_KEYS)
+
+        if result and 'candidates' in result and len(result['candidates']) > 0:
+            extracted_text = result['candidates'][0]['content']['parts'][0]['text']
+
+            # Clean the extracted text
+            cleaned_text = clean_arabic_text(extracted_text)
+
+            return jsonify({
+                'text': cleaned_text,
+                'success': True,
+                'raw_text': extracted_text  # Include raw text for debugging
+            })
+        else:
+            return jsonify({
+                'error': error or 'Failed to extract text from image',
+                'success': False
+            }), 500
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/login', methods=['POST'])
-def login():
-    try:
-        data = request.get_json()
-
-        if not data or not data.get('email') or not data.get('password'):
-            return jsonify({'error': 'Email dan password harus diisi'}), 400
-
-        email = data['email']
-        password = data['password']
-
-        # Cek user
-        if email not in users or users[email]['password'] != password:
-            return jsonify({'error': 'Email atau password salah'}), 401
-
         return jsonify({
-            'message': 'Login berhasil',
-            'user': {
-                'name': users[email]['name'],
-                'email': email
+            'error': f'Error processing image: {str(e)}',
+            'success': False
+        }), 500
+
+
+# ========== 2️⃣ Enhanced Arabic Analysis ==========
+@app.route('/analyze_arabic', methods=['POST'])
+def analyze_arabic():
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No JSON data provided', 'success': False}), 400
+
+        arabic_text = data.get('text', '')
+
+        if not arabic_text.strip():
+            return jsonify({'error': 'No text provided', 'success': False}), 400
+
+        # Use the same detailed prompt as the Colab version
+        prompt = f"""
+قم بتصحيح الأخطاء في النص التالي:
+
+**1. أخطاء النحو:**
+اذكر الأخطاء النحوية وتصحيحها بهذا الشكل:
+الخطأ_النحوي1 -> التصحيح_النحوي1
+الخطأ_النحوي2 -> التصحيح_النحوي2
+
+**2. أخطاء الصرف:**
+اذكر الأخطاء الصرفية وتصحيحها بهذا الشكل:
+الخطأ_الصرفي1 -> التصحيح_الصرفي1
+الخطأ_الصرفي2 -> التصحيح_الصرفي2
+
+**3. أخطاء الإملاء:**
+اذكر الأخطاء الإملائية وتصحيحها بهذا الشكل:
+الخطأ_الإملائي1 -> التصحيح_الإملائي1
+الخطأ_الإملائي2 -> التصحيح_الإملائي2
+
+**4. أخطاء التركيب:**
+اذكر أخطاء التركيب وتصحيحها بهذا الشكل:
+الخطأ_التركيبي1 -> التصحيح_التركيبي1
+الخطأ_التركيبي2 -> التصحيح_التركيبي2
+
+**النص المُصحح كاملاً:**
+اكتب النص كاملاً بعد التصحيح
+
+**النص المراد تصحيحه:**
+{arabic_text}
+
+ملاحظة: إذا لم توجد أخطاء في أي قسم، اكتب "لا توجد أخطاء" تحت ذلك القسم.
+"""
+
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 4096,
             }
-        })
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/analyze', methods=['POST'])
-def analyze_text():
-    try:
-        data = request.get_json()
-
-        if not data or not data.get('text'):
-            return jsonify({'error': 'Text harus diisi'}), 400
-
-        text = data['text']
-        user_email = data.get('user_email', '')
-
-        # Analisis dasar (ini bisa dikembangkan lebih lanjut)
-        words = text.lower().split()
-        word_count = len(words)
-
-        # Deteksi kata kunci INSYA (contoh sederhana)
-        insya_keywords = ['insya', 'allah', 'islam', 'iman', 'tauhid', 'ibadah', 'shalat', 'puasa', 'zakat', 'haji']
-        keyword_count = sum(1 for word in words if any(keyword in word for keyword in insya_keywords))
-
-        # Hitung durasi baca (perkiraan 200 kata per menit)
-        reading_time = max(1, round(word_count / 200))
-
-        result = {
-            'text': text,
-            'word_count': word_count,
-            'keyword_count': keyword_count,
-            'reading_time_minutes': reading_time,
-            'insya_score': min(100, (keyword_count / word_count) * 100) if word_count > 0 else 0,
-            'analyzed_at': datetime.now().isoformat(),
-            'user_email': user_email
         }
 
-        # Simpan hasil
-        results_history.append(result)
+        result, error = make_gemini_request(GEMINI_TEXT_URL, body, GEMINI_API_KEYS)
 
-        return jsonify({
-            'message': 'Analisis berhasil',
-            'result': result
-        })
+        if result and 'candidates' in result and len(result['candidates']) > 0:
+            analysis_text = result['candidates'][0]['content']['parts'][0]['text']
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/history/<email>', methods=['GET'])
-def get_history(email):
-    try:
-        user_results = [r for r in results_history if r.get('user_email') == email]
-
-        return jsonify({
-            'history': user_results,
-            'count': len(user_results)
-        })
+            return jsonify({
+                'success': True,
+                'analysis': analysis_text.strip(),
+                'raw_response': analysis_text
+            })
+        else:
+            return jsonify({
+                'error': error or 'Failed to analyze text',
+                'success': False
+            }), 500
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'error': f'Error analyzing text: {str(e)}',
+            'success': False
+        }), 500
 
-@app.route('/api/save-result', methods=['POST'])
-def save_result():
+
+# ========== 3️⃣ Combined OCR + Analysis Endpoint ==========
+@app.route('/ocr_and_analyze', methods=['POST'])
+def ocr_and_analyze():
+    """Combined OCR and Analysis like the Colab version"""
     try:
-        data = request.get_json()
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image file provided', 'success': False}), 400
 
-        if not data or not data.get('text') or not data.get('user_email'):
-            return jsonify({'error': 'Data tidak lengkap'}), 400
+        file = request.files['image']
+        if file.filename == '':
+            return jsonify({'error': 'No selected file', 'success': False}), 400
 
-        # Simpan hasil ke history
-        result = {
-            'text': data['text'],
-            'user_email': data['user_email'],
-            'analysis': data.get('analysis', {}),
-            'saved_at': datetime.now().isoformat()
+        # Step 1: OCR
+        print("Performing OCR with Gemini...")
+        image = Image.open(file.stream)
+        base64_image = encode_image_to_base64(image)
+
+        ocr_body = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": "استخرج النص العربي من هذه الصورة بدقة. أريد النص العربي فقط بدون أي تفسير أو تعليق إضافي."
+                        },
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": base64_image
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 2048,
+            }
         }
 
-        results_history.append(result)
+        ocr_result, ocr_error = make_gemini_request(GEMINI_VISION_URL, ocr_body, GEMINI_API_KEYS)
+
+        if not ocr_result or 'candidates' not in ocr_result or len(ocr_result['candidates']) == 0:
+            return jsonify({
+                'error': f'OCR failed: {ocr_error}',
+                'success': False
+            }), 500
+
+        extracted_text = ocr_result['candidates'][0]['content']['parts'][0]['text']
+        cleaned_extracted_text = clean_arabic_text(extracted_text)
+
+        print("Performing Language Analysis...")
+
+        # Step 2: Analysis using the same prompt as Colab
+        analysis_prompt = f"""
+قم بتصحيح الأخطاء في النص التالي:
+
+**1. أخطاء النحو:**
+اذكر الأخطاء النحوية وتصحيحها بهذا الشكل:
+الخطأ_النحوي1 -> التصحيح_النحوي1
+الخطأ_النحوي2 -> التصحيح_النحوي2
+
+**2. أخطاء الصرف:**
+اذكر الأخطاء الصرفية وتصحيحها بهذا الشكل:
+الخطأ_الصرفي1 -> التصحيح_الصرفي1
+الخطأ_الصرفي2 -> التصحيح_الصرفي2
+
+**3. أخطاء الإملاء:**
+اذكر الأخطاء الإملائية وتصحيحها بهذا الشكل:
+الخطأ_الإملائي1 -> التصحيح_الإملائي1
+الخطأ_الإملائي2 -> التصحيح_الإملائي2
+
+**4. أخطاء التركيب:**
+اذكر أخطاء التركيب وتصحيحها بهذا الشكل:
+الخطأ_التركيبي1 -> التصحيح_التركيبي1
+الخطأ_التركيبي2 -> التصحيح_التركيبي2
+
+**النص المُصحح كاملاً:**
+اكتب النص كاملاً بعد التصحيح
+
+**النص المراد تصحيحه:**
+{cleaned_extracted_text}
+
+ملاحظة: إذا لم توجد أخطاء في أي قسم، اكتب "لا توجد أخطاء" تحت ذلك القسم.
+"""
+
+        analysis_body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": analysis_prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 4096,
+            }
+        }
+
+        analysis_result, analysis_error = make_gemini_request(GEMINI_TEXT_URL, analysis_body, GEMINI_API_KEYS)
+
+        if not analysis_result or 'candidates' not in analysis_result or len(analysis_result['candidates']) == 0:
+            return jsonify({
+                'success': True,
+                'extracted_text': cleaned_extracted_text,
+                'analysis': f'Analysis failed: {analysis_error}',
+                'error_in_analysis': True
+            })
+
+        analysis_text = analysis_result['candidates'][0]['content']['parts'][0]['text']
 
         return jsonify({
-            'message': 'Hasil berhasil disimpan',
-            'result': result
-        }), 201
+            'success': True,
+            'extracted_text': cleaned_extracted_text,
+            'analysis': analysis_text.strip(),
+            'message': 'OCR and analysis completed successfully',
+            'raw_extracted_text': extracted_text  # Include for debugging
+        })
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'error': f'Error in OCR and analysis: {str(e)}',
+            'success': False
+        }), 500
 
-@app.route('/api/health', methods=['GET'])
+
+# ========== 4️⃣ Generate Arabic Text ==========
+@app.route('/generate_arabic', methods=['POST'])
+def generate_arabic():
+    try:
+        data = request.json
+        if not data:
+            data = {}
+
+        prompt = data.get('prompt', 'اكتب لي نصا عربيا قصيرا')
+
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 1024,
+            }
+        }
+
+        result, error = make_gemini_request(GEMINI_TEXT_URL, body, GEMINI_API_KEYS)
+
+        if result and 'candidates' in result and len(result['candidates']) > 0:
+            generated_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
+            return jsonify({
+                'success': True,
+                'generated_text': generated_text
+            })
+        else:
+            return jsonify({
+                'error': error or 'Failed to generate text',
+                'success': False
+            }), 500
+
+    except Exception as e:
+        return jsonify({
+            'error': f'Error generating text: {str(e)}',
+            'success': False
+        }), 500
+
+
+# ========== 5️⃣ Generate + Analyze Combined ==========
+@app.route('/generate_and_analyze', methods=['POST'])
+def generate_and_analyze():
+    try:
+        data = request.json
+        if not data:
+            data = {}
+
+        prompt = data.get('prompt', 'اكتب لي نصا عربيا قصيرا')
+
+        # Step 1: Generate text
+        generate_body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 1024,
+            }
+        }
+
+        gen_result, gen_error = make_gemini_request(GEMINI_TEXT_URL, generate_body, GEMINI_API_KEYS)
+
+        if not gen_result or 'candidates' not in gen_result or len(gen_result['candidates']) == 0:
+            return jsonify({
+                'error': f'Text generation failed: {gen_error}',
+                'success': False
+            }), 500
+
+        generated_text = gen_result['candidates'][0]['content']['parts'][0]['text'].strip()
+
+        # Step 2: Analyze the generated text
+        analysis_prompt = f"""
+قم بتصحيح الأخطاء في النص التالي:
+
+**1. أخطاء النحو:**
+اذكر الأخطاء النحوية وتصحيحها بهذا الشكل:
+الخطأ_النحوي1 -> التصحيح_النحوي1
+الخطأ_النحوي2 -> التصحيح_النحوي2
+
+**2. أخطاء الصرف:**
+اذكر الأخطاء الصرفية وتصحيحها بهذا الشكل:
+الخطأ_الصرفي1 -> التصحيح_الصرفي1
+الخطأ_الصرفي2 -> التصحيح_الصرفي2
+
+**3. أخطاء الإملاء:**
+اذكر الأخطاء الإملائية وتصحيحها بهذا الشكل:
+الخطأ_الإملائي1 -> التصحيح_الإملائي1
+الخطأ_الإملائي2 -> التصحيح_الإملائي2
+
+**4. أخطاء التركيب:**
+اذكر أخطاء التركيب وتصحيحها بهذا الشكل:
+الخطأ_التركيبي1 -> التصحيح_التركيبي1
+الخطأ_التركيبي2 -> التصحيح_التركيبي2
+
+**النص المُصحح كاملاً:**
+اكتب النص كاملاً بعد التصحيح
+
+**النص المراد تصحيحه:**
+{generated_text}
+
+ملاحظة: إذا لم توجد أخطاء في أي قسم، اكتب "لا توجد أخطاء" تحت ذلك القسم.
+"""
+
+        analyze_body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": analysis_prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 4096,
+            }
+        }
+
+        analyze_result, analyze_error = make_gemini_request(GEMINI_TEXT_URL, analyze_body, GEMINI_API_KEYS)
+
+        if not analyze_result or 'candidates' not in analyze_result or len(analyze_result['candidates']) == 0:
+            return jsonify({
+                'success': True,
+                'generated_text': generated_text,
+                'analysis': f'Analysis failed: {analyze_error}',
+                'error_in_analysis': True
+            })
+
+        analysis_text = analyze_result['candidates'][0]['content']['parts'][0]['text'].strip()
+
+        return jsonify({
+            'success': True,
+            'generated_text': generated_text,
+            'analysis': analysis_text
+        })
+
+    except Exception as e:
+        return jsonify({
+            'error': f'Error in generate and analyze: {str(e)}',
+            'success': False
+        }), 500
+
+
+# ========== Health Check Endpoint ==========
+@app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'version': '1.0.0'
+        'message': 'Enhanced Arabic Text Analyzer API is running',
+        'api_keys_count': len(GEMINI_API_KEYS),
+        'endpoints': {
+            'ocr': '/ocr - Extract Arabic text from images',
+            'analyze_arabic': '/analyze_arabic - Analyze Arabic text for errors',
+            'ocr_and_analyze': '/ocr_and_analyze - Combined OCR + Analysis',
+            'generate_arabic': '/generate_arabic - Generate Arabic text',
+            'generate_and_analyze': '/generate_and_analyze - Generate + Analyze'
+        }
     })
 
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    print("Starting Enhanced Arabic Text Analyzer API...")
+    print(f"Using {len(GEMINI_API_KEYS)} API keys for fallback")
+    print("Available endpoints:")
+    print("   - POST /ocr - Extract Arabic text from images")
+    print("   - POST /analyze_arabic - Detailed Arabic text analysis")
+    print("   - POST /ocr_and_analyze - Combined OCR + Analysis (like Colab)")
+    print("   - POST /generate_arabic - Generate Arabic text")
+    print("   - POST /generate_and_analyze - Generate + Analyze")
+    print("   - GET /health - Health check")
+    print(f"Server running on http://localhost:5000")
+
+    app.run(debug=True, port=5000, host='0.0.0.0')
