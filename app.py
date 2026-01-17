@@ -12,6 +12,8 @@ CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS
 
 # 🔑 Multiple API Keys for fallback - ganti dengan API keys milikmu
 GEMINI_API_KEYS = [
+         "AIzaSyCxmGRVK9KFE8kHdxH6ON63lw9BtjxhV5M",
+
      # "AIzaSyDvo1FDQbtVtLxpGk1E40_xE0wv3xtpuys",
      "AIzaSyAJl7pwh_Hj5fmRFtQl6T14ZkiTzdrautQ", 
     "AIzaSyDvo1FDQbtVtLxpGk1E40_xE0wv3xtpuys"
